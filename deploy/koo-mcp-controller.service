@@ -6,7 +6,11 @@ Requires=docker.service
 
 [Service]
 Type=simple
-User=ubuntu
+# 전용 서비스 유저. 핵심: docker 그룹에 넣지 않는다 → 컨트롤러가 털려도
+# raw /var/run/docker.sock에 직접 못 붙고, 반드시 socket-proxy(2375)만 경유.
+# /home/ubuntu(750) 진입을 위해 ubuntu 그룹만 보조로 부여.
+User=koomcp
+SupplementaryGroups=ubuntu
 WorkingDirectory=/home/ubuntu/koomcp/controller
 # 환경 고유값(AUTHKIT_DOMAIN, BASE_URL 등)은 커밋되지 않는 파일에서 읽는다.
 # 배포 시 deploy/koomcp.env.example → /etc/koomcp.env 로 복사해 채워둘 것.

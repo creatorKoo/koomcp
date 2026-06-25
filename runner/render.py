@@ -16,6 +16,27 @@ MAX_CHARS = 1_000_000      # 출력 폭주 방지
 NAV_TIMEOUT_MS = 20_000    # 페이지 로드 타임아웃
 
 
+_host_public_cache: dict[str, bool] = {}
+
+
+def _host_is_public(host: str) -> bool:
+    """host가 공인 IP로만 해석되는지(=내부망/메타데이터가 아닌지). 결과 캐시."""
+    if host in _host_public_cache:
+        return _host_public_cache[host]
+    ok = True
+    try:
+        for res in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(res[4][0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                ok = False
+                break
+    except Exception:
+        ok = False
+    _host_public_cache[host] = ok
+    return ok
+
+
 def assert_public_host(url: str) -> None:
     """공인 IP로만 해석되는 http/https URL인지 검증."""
     parsed = urlparse(url)
@@ -24,11 +45,8 @@ def assert_public_host(url: str) -> None:
     host = parsed.hostname
     if not host:
         raise ValueError("호스트 없음")
-    for res in socket.getaddrinfo(host, None):
-        ip = ipaddress.ip_address(res[4][0])
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-            raise ValueError(f"비공인 IP 차단: {ip}")
+    if not _host_is_public(host):
+        raise ValueError(f"비공인 IP 차단: {host}")
 
 
 async def render(url: str) -> str:
@@ -45,12 +63,22 @@ async def render(url: str) -> str:
             ctx = await browser.new_context(ignore_https_errors=False)
             page = await ctx.new_page()
 
-            # 메모리 절약: 이미지/미디어/폰트 차단
+            # 모든 요청을 가로채서: ①이미지/미디어/폰트 차단(메모리 절약)
+            # ②http(s) 요청은 매번 호스트를 재검증(리다이렉트·sub-resource로
+            #   내부망/메타데이터에 도달하려는 SSRF를 app 레이어에서도 차단).
+            #   data:/blob:/about: 등 네트워크를 안 타는 스킴은 통과.
             async def _route(route):
-                if route.request.resource_type in ("image", "media", "font"):
+                req = route.request
+                if req.resource_type in ("image", "media", "font"):
                     await route.abort()
-                else:
-                    await route.continue_()
+                    return
+                parsed = urlparse(req.url)
+                if parsed.scheme in ("http", "https"):
+                    host = parsed.hostname
+                    if not host or not _host_is_public(host):
+                        await route.abort()
+                        return
+                await route.continue_()
 
             await page.route("**/*", _route)
             await page.goto(url, wait_until="networkidle", timeout=NAV_TIMEOUT_MS)

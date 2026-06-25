@@ -6,8 +6,8 @@
 # 이건 컨트롤러 침해 시 2차 방어다. 개인 박스 기준 수용 가능한 트레이드오프.
 services:
   socket-proxy:
-    # TODO(배포): 최초 pull 후 digest로 핀 고정 권장.
-    image: tecnativa/docker-socket-proxy:latest
+    # 공급망 방어: digest 핀 고정. 업그레이드는 새 digest로 의도적으로 교체할 것.
+    image: tecnativa/docker-socket-proxy:latest@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     container_name: surf-socket-proxy
     restart: unless-stopped
     environment:

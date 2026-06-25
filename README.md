@@ -60,18 +60,21 @@ docker run --rm --runtime=runsc --network=surf-egress \
 python3 -m venv ~/koomcp/controller/.venv
 ~/koomcp/controller/.venv/bin/pip install -r ~/koomcp/controller/requirements.txt
 
-# 7) systemd 등록
+# 7) 컨트롤러 전용 유저 (docker 그룹 제외 — socket-proxy만 경유하도록)
+sudo useradd --system --shell /usr/sbin/nologin -G ubuntu koomcp || true
+
+# 8) systemd 등록 (유닛은 User=koomcp, EnvironmentFile=/etc/koomcp.env)
 sudo cp ~/koomcp/deploy/koo-mcp-controller.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now koo-mcp-controller
 sudo systemctl status koo-mcp-controller
 
-# 8) Caddy
+# 9) Caddy
 sudo apt-get install -y caddy   # 또는 공식 설치 스크립트
 cp ~/koomcp/deploy/Caddyfile.example ~/koomcp/deploy/Caddyfile   # 도메인 채우고
 sudo cp ~/koomcp/deploy/Caddyfile /etc/caddy/Caddyfile
 sudo systemctl restart caddy
 
-# 9) 동작 확인 (디스커버리 체인)
+# 10) 동작 확인 (디스커버리 체인)
 curl -s https://<내도메인>/.well-known/oauth-authorization-server | head
 ```
 
@@ -93,3 +96,8 @@ curl -s https://<내도메인>/.well-known/oauth-authorization-server | head
 - [x] JWT 검증 (AuthKitProvider)
 - [x] 임의 JS 실행 도구 미노출 (fetch_webpage만)
 - [x] 리소스 한도 (memory/cpus/timeout/pids)
+- [x] 컨트롤러 전용 유저(`koomcp`)는 docker 그룹 비소속 → raw docker.sock 직접 접근 차단
+- [x] socket-proxy 이미지 digest 핀 고정
+- [x] 동시 runner 수 상한 (`MAX_CONCURRENCY`, 기본 3) — 자원 고갈 방어
+- [x] runner 내 리다이렉트/sub-resource 호스트 재검증 (egress 방화벽과 이중)
+- [x] SSH 패스워드 인증 비활성 + root 로그인 차단, rpcbind 리스너 mask

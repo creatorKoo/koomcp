@@ -28,8 +28,22 @@ RUNNER_NETWORK = os.environ.get("RUNNER_NETWORK", "surf-egress")
 # 공용 DNS를 담은 resolv.conf를 직접 bind-mount해 우회한다. (surf-egress 격리는 유지)
 RESOLV_CONF = os.environ.get("RUNNER_RESOLV_CONF", "/etc/web-surf-resolv.conf")
 RENDER_TIMEOUT = int(os.environ.get("RENDER_TIMEOUT", "30"))
+# 동시에 띄울 수 있는 runner 컨테이너 수 상한. authed 유저가 fetch를 난사해도
+# 박스 자원(메모리/CPU)이 고갈되지 않게 막는다. 초과 요청은 슬롯이 날 때까지 대기.
+MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "3"))
 HOST = os.environ.get("HOST", "127.0.0.1")                   # 외부 노출은 Caddy를 통해서만
 PORT = int(os.environ.get("PORT", "8000"))
+
+# asyncio.Semaphore는 import 시점에 만들면 이벤트루프 바인딩 문제가 생길 수 있어
+# 첫 사용 시점에 lazy-init 한다.
+_runner_semaphore: asyncio.Semaphore | None = None
+
+
+def _runner_sem() -> asyncio.Semaphore:
+    global _runner_semaphore
+    if _runner_semaphore is None:
+        _runner_semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+    return _runner_semaphore
 
 auth = AuthKitProvider(authkit_domain=AUTHKIT_DOMAIN, base_url=BASE_URL)
 mcp = FastMCP(name="koo-mcp", auth=auth)
@@ -78,17 +92,19 @@ async def fetch_webpage(url: str) -> str:
         "--memory", "1g", "--cpus", "1",       # 자원 고갈 방지
         RUNNER_IMAGE, url,
     ]
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=RENDER_TIMEOUT)
-    except asyncio.TimeoutError:
-        # 로컬 docker CLI를 죽여도 원격(proxy) 컨테이너는 남으므로 강제 제거
-        await _force_remove(name)
-        raise RuntimeError("렌더링 타임아웃")
+    # 동시 runner 수 제한 (자원 고갈/DoS 방어). 슬롯이 없으면 여기서 대기.
+    async with _runner_sem():
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=RENDER_TIMEOUT)
+        except asyncio.TimeoutError:
+            # 로컬 docker CLI를 죽여도 원격(proxy) 컨테이너는 남으므로 강제 제거
+            await _force_remove(name)
+            raise RuntimeError("렌더링 타임아웃")
     if proc.returncode != 0:
         raise RuntimeError(f"runner 실패: {err.decode(errors='replace')[:500]}")
     return out.decode(errors="replace")
