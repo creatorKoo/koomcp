@@ -101,3 +101,11 @@ curl -s https://<내도메인>/.well-known/oauth-authorization-server | head
 - [x] 동시 runner 수 상한 (`MAX_CONCURRENCY`, 기본 3) — 자원 고갈 방어
 - [x] runner 내 리다이렉트/sub-resource 호스트 재검증 (egress 방화벽과 이중)
 - [x] SSH 패스워드 인증 비활성 + root 로그인 차단, rpcbind 리스너 mask
+
+## 업데이트 전략
+
+기조: **자동으로 계속 올리고, 깨지면 그때 개입해 롤백**한다(개인 박스 기준 유지비가 가장 쌈).
+
+- **자동(핀 없음)** — OS 패키지(`-security`+`-updates`)와 **gVisor(runsc)** 까지 unattended-upgrades로 자동 설치, 04:00 자동 재부팅으로 커널 반영. 전부 **서명된 신뢰 repo**(Ubuntu, Google)라 자동화 안전. 설정: `/etc/apt/apt.conf.d/52koomcp-unattended.conf`.
+- **핀 유지(유일한 예외) — socket-proxy 이미지 digest.** 이건 "최신 유지"가 아니라 **공급망 방어**다. `:latest`는 가변 태그라 tecnativa 계정/태그가 탈취되면 docker.sock 권한을 가진 악성 이미지를 자동으로 끌어오게 됨(=호스트 전체 장악). apt(서명 검증)와 달리 Docker Hub 태그는 보증이 약하고, 이 컨테이너는 가장 민감한 표적이라 staleness 비용(거의 0)보다 오염 비용(치명적)이 압도적. → digest 핀 유지, 연 몇 회 의도적으로 bump.
+- **앱 의존성(`fastmcp==3.4.2`, runner Chromium 이미지)** — 재배포 때만 갱신(서버 자동 대상 아님). 재현 가능한 배포 위해 핀 유지하고 직접 bump. Chromium 렌더러 취약점은 어차피 gVisor(자동 패치됨)가 가둠.
