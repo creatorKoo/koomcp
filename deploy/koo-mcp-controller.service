@@ -1,0 +1,31 @@
+[Unit]
+Description=koo-mcp controller
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/koomcp/controller
+# 환경 고유값(AUTHKIT_DOMAIN, BASE_URL 등)은 커밋되지 않는 파일에서 읽는다.
+# 배포 시 deploy/koomcp.env.example → /etc/koomcp.env 로 복사해 채워둘 것.
+EnvironmentFile=/etc/koomcp.env
+# Docker는 socket-proxy를 통해서만 호출 (raw docker.sock 미사용)
+Environment=DOCKER_HOST=tcp://127.0.0.1:2375
+Environment=RUNNER_IMAGE=web-surf-runner:latest
+Environment=RUNNER_RUNTIME=runsc
+Environment=RUNNER_NETWORK=surf-egress
+ExecStart=/home/ubuntu/koomcp/controller/.venv/bin/python controller.py
+Restart=always
+RestartSec=3
+
+# --- 프로세스 하드닝 ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

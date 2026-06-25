@@ -1,0 +1,13 @@
+# 파이썬
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 배포 환경 고유값 (식별정보 포함 — 커밋 금지). *.example만 커밋한다.
+deploy/koomcp.env
+deploy/Caddyfile
+
+# 로컬 도구/에디터
+.claude/settings.local.json
+.DS_Store
