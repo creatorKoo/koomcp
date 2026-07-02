@@ -34,7 +34,9 @@
 - 동시 runner 수는 `MAX_CONCURRENCY`(기본 3) 세마포어로 상한 — 자원 고갈/DoS 방어.
 - 크기/시간 상한: 스크린샷·이미지 raw 5MB, full_page 높이 4000px, 이미지 장변 8000px(초과 시 에러 —
   Claude API 메시지 거부 방지), 본문 마커 40개 — 상수는 `runner/render.py` 상단.
-  `RENDER_TIMEOUT_SCREENSHOT`(기본 45s)·`STDOUT_MAX_BYTES`(기본 20MB)는 컨트롤러 env.
+  타임아웃은 컨트롤러 env: `RENDER_TIMEOUT`(텍스트, 기본 40s)·`RENDER_TIMEOUT_SCREENSHOT`(기본 50s)·
+  `STDOUT_MAX_BYTES`(기본 20MB). lazy-load/무한스크롤은 runner가 자동 스크롤로 처리하되, 텍스트
+  모드는 이미지가 abort돼 페이지 JS가 lazy URL을 망치기 전에 **정적 마크업에서 마커를 먼저 확보**한다.
 
 ## MCP 도구 description 작성 방침
 

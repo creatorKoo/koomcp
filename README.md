@@ -8,11 +8,11 @@ JS로 렌더링되는 웹페이지를 가져오는 remote MCP 서버. Claude.ai 
 
 | 도구 | 기능 |
 |---|---|
-| `fetch_webpage(url, include_screenshot=False, full_page=False)` | JS 렌더링 후 본문 텍스트. 이미지 위치에 `[이미지: alt — URL]` 마커 항상 포함(최대 40개). `include_screenshot=True`면 스크린샷(JPEG, 뷰포트 1280×800)을 MCP 이미지 블록으로 동봉, `full_page=True`면 스크롤 전체(최대 4000px, 스크린샷 자동 포함) |
+| `fetch_webpage(url, include_screenshot=False, full_page=False)` | JS 렌더링 후 본문 텍스트. 로드 후 자동 스크롤로 무한스크롤·lazy-load 콘텐츠와 이미지를 실제로 채운다. 이미지 위치에 `[이미지: alt — URL]` 마커 항상 포함(최대 40개; `data-lazy-src` 등 lazy 속성까지 해석). `include_screenshot=True`면 스크린샷(JPEG, 뷰포트 1280×800)을 MCP 이미지 블록으로 동봉, `full_page=True`면 스크롤 전체(최대 4000px, 스크린샷 자동 포함) |
 | `fetch_image(image_url)` | 특정 이미지를 원본 해상도로 반환 (JPEG/PNG/GIF/WebP ≤5MB, 장변 ≤8000px; SVG는 래스터라이즈). 마커에서 고른 이미지를 자세히 볼 때 |
 
-한도: 스크린샷/이미지 raw 5MB(초과 시 품질 50 재시도 후 생략), 텍스트 1MB, 스크린샷 경로
-타임아웃 45s(텍스트 30s). runner stdout은 JSON envelope(`{"v":1, ...}`).
+한도: 스크린샷/이미지 raw 5MB(초과 시 품질 50 재시도 후 생략), 텍스트 1MB, 타임아웃 텍스트 40s /
+스크린샷 50s(무한스크롤·lazy 처리로 무거운 페이지 여유). runner stdout은 JSON envelope(`{"v":1, ...}`).
 
 알려진 한계: PDF·다운로드 트리거 URL은 실패(브라우저 렌더링 대상 아님).
 

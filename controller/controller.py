@@ -31,9 +31,11 @@ RUNNER_NETWORK = os.environ.get("RUNNER_NETWORK", "surf-egress")
 # gVisor 유저공간 netstack은 Docker 임베디드 DNS(127.0.0.11)를 지원하지 않으므로,
 # 공용 DNS를 담은 resolv.conf를 직접 bind-mount해 우회한다. (surf-egress 격리는 유지)
 RESOLV_CONF = os.environ.get("RUNNER_RESOLV_CONF", "/etc/web-surf-resolv.conf")
-RENDER_TIMEOUT = int(os.environ.get("RENDER_TIMEOUT", "30"))
-# 스크린샷 경로는 이미지·폰트 로딩 + 캡처가 더 걸림 → 별도 여유 (텍스트 SLA 무변경)
-RENDER_TIMEOUT_SCREENSHOT = int(os.environ.get("RENDER_TIMEOUT_SCREENSHOT", "45"))
+# lazy-load/무한스크롤 자동 처리로 무거운 페이지(예: 네이버 블로그)는 ~25s까지 걸려
+# 넉넉한 상한을 둔다. 정상 페이지는 5~10s라 영향 없음(타임아웃은 상한일 뿐).
+RENDER_TIMEOUT = int(os.environ.get("RENDER_TIMEOUT", "40"))
+# 스크린샷 경로는 이미지·폰트 로딩 + 캡처가 더 걸림 → 추가 여유
+RENDER_TIMEOUT_SCREENSHOT = int(os.environ.get("RENDER_TIMEOUT_SCREENSHOT", "50"))
 # runner stdout 상한 — 1차 캡은 runner 안(5MB raw 스크린샷 등)이고 이건 방어선
 STDOUT_MAX_BYTES = int(os.environ.get("STDOUT_MAX_BYTES", str(20 * 1024 * 1024)))
 # 동시에 띄울 수 있는 runner 컨테이너 수 상한. authed 유저가 fetch를 난사해도

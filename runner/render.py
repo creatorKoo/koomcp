@@ -28,7 +28,13 @@ from playwright.async_api import TimeoutError as PWTimeoutError
 from playwright.async_api import async_playwright
 
 MAX_CHARS = 1_000_000        # 본문 텍스트 상한
-NAV_TIMEOUT_MS = 20_000      # 페이지 로드 타임아웃
+NAV_TIMEOUT_MS = 20_000      # goto(domcontentloaded) 상한
+# 초기 XHR/SPA 콘텐츠 정착 대기 상한. networkidle은 광고·분석·소켓 때문에 안 오는
+# 페이지가 흔해 goto의 wait 조건으로 두면 매번 NAV_TIMEOUT을 통째로 날린다 →
+# domcontentloaded로 빠르게 진입한 뒤 짧게만 networkidle을 기다린다(best-effort).
+# (이미지 마커는 이 대기 *전에* 정적 마크업에서 확보하므로, 이 값은 이미지 정확도와
+#  무관하고 순전히 지연/SPA-텍스트 트레이드오프다.)
+IDLE_SETTLE_MS = 3_000
 
 SHOT_VIEWPORT = {"width": 1280, "height": 800}
 SHOT_QUALITY = 80
@@ -92,15 +98,31 @@ def _make_route(blocked_types: tuple[str, ...]):
     return _route
 
 
+# 마커에서 지울 placeholder alt (실제 설명이 아니라 lazy-load 안내 문구).
+_PLACEHOLDER_ALTS = {"존재하지 않는 이미지입니다", "이미지", "image", "img"}
+
 # 고정 내부 스니펫 (사용자 입력이 흘러들지 않음 — 인자는 정수 상수뿐).
 # 각 <img>를 위치 그대로 텍스트 마커로 치환 → inner_text가 마커를 문맥과 함께 포함.
+# URL은 폴백 체인으로 해석 — lazy-load 페이지(네이버 스마트에디터 등)는 실제
+# URL이 src가 아니라 data-lazy-src/data-src 등에 들어있고, 이미지 요청이 abort된
+# 텍스트 모드에서는 src가 비어있을 수 있으므로 data 속성까지 훑는다.
 _IMG_MARKER_JS = """
-(maxMarkers) => {
+(args) => {
+  const [maxMarkers, placeholderAlts] = args;
+  const http = (s) => (/^https?:/i.test(s || "") ? s : "");
+  const resolve = (el) => {
+    let u = http(el.currentSrc) || http(el.getAttribute("src"))
+         || http(el.getAttribute("data-lazy-src")) || http(el.getAttribute("data-src"))
+         || http(el.getAttribute("data-original")) || http(el.getAttribute("data-echo"));
+    if (u) return u;
+    const ss = el.getAttribute("srcset") || el.getAttribute("data-srcset") || "";
+    return http(ss.trim().split(/[\\s,]+/)[0]);          // srcset 첫 후보
+  };
   const seen = new Set();
   const collected = [];
   for (const el of Array.from(document.querySelectorAll("img"))) {
-    const src = el.currentSrc || el.src || "";
-    if (!/^https?:/i.test(src)) continue;                       // data:/blob: 제외
+    const src = resolve(el);
+    if (!src) continue;                                          // data:/blob:/미해석 제외
     const wAttr = parseInt(el.getAttribute("width") || "", 10);
     const hAttr = parseInt(el.getAttribute("height") || "", 10);
     if ((wAttr && wAttr <= 2) || (hAttr && hAttr <= 2)) continue;  // 추적픽셀
@@ -108,7 +130,9 @@ _IMG_MARKER_JS = """
     if (seen.has(src)) continue;                                 // 반복 로고 등 dedup
     seen.add(src);
     if (collected.length >= maxMarkers) break;
-    const alt = (el.getAttribute("alt") || "").trim().slice(0, 120);
+    let alt = (el.getAttribute("alt") || "").trim();
+    if (placeholderAlts.includes(alt.toLowerCase())) alt = "";   // lazy 안내 문구 무시
+    alt = alt.slice(0, 120);
     collected.push({ src: src, alt: alt });
     const label = alt ? `[이미지: ${alt} — ${src}]` : `[이미지 — ${src}]`;
     try { el.replaceWith(document.createTextNode(" " + label + " ")); } catch (e) {}
@@ -116,6 +140,34 @@ _IMG_MARKER_JS = """
   return collected;
 }
 """
+
+
+SCROLL_MAX_STEPS = 8         # 무한스크롤 안전 상한
+SCROLL_WAIT_MS = 300         # 스텝당 lazy 로드 대기
+
+
+async def _autoscroll(page) -> None:
+    """페이지를 아래로 훑어 lazy-load 콘텐츠/이미지 src를 트리거한 뒤 top 복귀.
+
+    - JS로 렌더/무한스크롤되는 콘텐츠, IntersectionObserver 기반 lazy 이미지가
+      실제로 채워지게 한다 (도구가 표방하는 "무한스크롤" 지원의 실체).
+    - scrollHeight가 더 안 커지면 조기 종료 → 유한 긴 문서/무한스크롤 모두 바운드.
+    - 이미지가 abort되는 텍스트 모드에서도 스크롤은 lazy-loader의 src 대입(JS)을
+      유발하므로 마커 URL 해석에 도움. 실패해도 추출은 계속(호출부에서 무시).
+    """
+    try:
+        last_h = 0
+        for _ in range(SCROLL_MAX_STEPS):
+            h = int(await page.evaluate("() => document.documentElement.scrollHeight") or 0)
+            await page.evaluate("(y) => window.scrollTo(0, y)", h)
+            await page.wait_for_timeout(SCROLL_WAIT_MS)
+            if h <= last_h:      # 더 안 자람 → 바닥 도달
+                break
+            last_h = h
+        await page.evaluate("() => window.scrollTo(0, 0)")
+        await page.wait_for_timeout(150)
+    except Exception:
+        pass
 
 
 async def _shoot(page, quality: int, *, clip=None, full_page=False) -> bytes:
@@ -132,13 +184,7 @@ async def _capture_screenshot(page, full_page: bool, notes: list[str]) -> bytes 
     clip = None
     use_full = False
     if full_page:
-        # lazy-load 이미지가 아래쪽에서 빈칸으로 찍히는 것 방지: 프리스크롤
-        try:
-            await page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
-            await page.wait_for_timeout(800)
-            await page.evaluate("() => window.scrollTo(0, 0)")
-        except Exception:
-            pass
+        # lazy-load 프리스크롤은 render()의 _autoscroll이 이미 수행함
         try:
             doc_h = int(await page.evaluate("() => document.documentElement.scrollHeight") or 0)
         except Exception:
@@ -196,21 +242,41 @@ async def render(url: str, screenshot: bool = False, full_page: bool = False) ->
             await page.route("**/*", _make_route(blocked))
 
             try:
-                await page.goto(url, wait_until="networkidle", timeout=NAV_TIMEOUT_MS)
+                await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
             except PWTimeoutError:
-                # 광고/분석 스크립트가 많은 페이지는 networkidle에 도달 못함 —
-                # DOM은 대개 완성돼 있으므로 best-effort로 계속 진행.
-                notes.append("페이지 로드 타임아웃(networkidle 미도달) — 부분 렌더링 상태에서 추출")
+                notes.append("페이지 로드 타임아웃 — 부분 렌더링 상태에서 추출")
 
-            shot = None
+            async def _collect_markers():
+                # 각 <img>를 위치 그대로 텍스트 마커로 치환하고 URL 목록을 반환.
+                try:
+                    return await page.evaluate(
+                        _IMG_MARKER_JS, [IMG_MARKER_MAX, sorted(_PLACEHOLDER_ALTS)]
+                    )
+                except Exception:
+                    return []
+
+            async def _settle():
+                # SPA가 XHR로 본문을 채울 시간을 짧게만 준다 (networkidle은 안 오는
+                # 페이지가 흔해 상한만 둠). 이어서 무한스크롤/lazy 콘텐츠를 채운다.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=IDLE_SETTLE_MS)
+                except PWTimeoutError:
+                    pass
+                await _autoscroll(page)
+
             if screenshot:
+                # 이미지 허용 모드: lazy-loader가 정상 로드 → 정착·스크롤 후 캡처,
+                # 마커는 캡처 *후* 삽입(마커가 화면에 찍히면 안 됨).
+                await _settle()
                 shot = await _capture_screenshot(page, full_page, notes)
-
-            # 마커 삽입은 스크린샷 캡처 *후* (마커가 화면에 찍히면 안 됨)
-            try:
-                images = await page.evaluate(_IMG_MARKER_JS, IMG_MARKER_MAX)
-            except Exception:
-                images = []
+                images = await _collect_markers()
+            else:
+                # 텍스트 모드: 이미지가 abort되므로, 페이지 JS가 lazy <img>를 에러
+                # placeholder로 바꿔 URL을 날리기 *전에* 정적 마크업(data-lazy-src 등)에서
+                # 먼저 마커를 확보한다. 그 뒤 정착·스크롤로 무한스크롤 텍스트를 채운다.
+                shot = None
+                images = await _collect_markers()
+                await _settle()
 
             try:
                 text = await page.inner_text("body")
