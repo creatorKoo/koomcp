@@ -22,6 +22,7 @@ import json
 import socket
 import struct
 import sys
+import time
 from urllib.parse import urlparse
 
 from playwright.async_api import TimeoutError as PWTimeoutError
@@ -34,7 +35,7 @@ NAV_TIMEOUT_MS = 20_000      # goto(domcontentloaded) 상한
 # domcontentloaded로 빠르게 진입한 뒤 짧게만 networkidle을 기다린다(best-effort).
 # (이미지 마커는 이 대기 *전에* 정적 마크업에서 확보하므로, 이 값은 이미지 정확도와
 #  무관하고 순전히 지연/SPA-텍스트 트레이드오프다.)
-IDLE_SETTLE_MS = 3_000
+IDLE_SETTLE_MS = 1_500
 
 SHOT_VIEWPORT = {"width": 1280, "height": 800}
 SHOT_QUALITY = 80
@@ -142,8 +143,10 @@ _IMG_MARKER_JS = """
 """
 
 
-SCROLL_MAX_STEPS = 8         # 무한스크롤 안전 상한
+SCROLL_MAX_STEPS = 8         # 무한스크롤 안전 상한(스텝 수)
 SCROLL_WAIT_MS = 300         # 스텝당 lazy 로드 대기
+SCROLL_BUDGET_S = 3.0        # 오토스크롤 wall-clock 상한(무거운 페이지 대비 — 스텝 비용이
+                             # 페이지마다 제각각이라 스텝 수만으론 시간이 안 잡힘)
 
 
 async def _autoscroll(page) -> None:
@@ -151,13 +154,17 @@ async def _autoscroll(page) -> None:
 
     - JS로 렌더/무한스크롤되는 콘텐츠, IntersectionObserver 기반 lazy 이미지가
       실제로 채워지게 한다 (도구가 표방하는 "무한스크롤" 지원의 실체).
-    - scrollHeight가 더 안 커지면 조기 종료 → 유한 긴 문서/무한스크롤 모두 바운드.
+    - 종료 조건 3중: scrollHeight가 더 안 커지면 조기 종료 / 스텝 수 상한 /
+      wall-clock 예산. 무한 append 페이지(네이버 등)에서 스텝당 비용이 커도 바운드.
     - 이미지가 abort되는 텍스트 모드에서도 스크롤은 lazy-loader의 src 대입(JS)을
       유발하므로 마커 URL 해석에 도움. 실패해도 추출은 계속(호출부에서 무시).
     """
     try:
+        deadline = time.monotonic() + SCROLL_BUDGET_S
         last_h = 0
         for _ in range(SCROLL_MAX_STEPS):
+            if time.monotonic() > deadline:
+                break
             h = int(await page.evaluate("() => document.documentElement.scrollHeight") or 0)
             await page.evaluate("(y) => window.scrollTo(0, y)", h)
             await page.wait_for_timeout(SCROLL_WAIT_MS)
