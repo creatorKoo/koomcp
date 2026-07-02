@@ -111,13 +111,27 @@ _IMG_MARKER_JS = """
 (args) => {
   const [maxMarkers, placeholderAlts] = args;
   const http = (s) => (/^https?:/i.test(s || "") ? s : "");
+  const normalize = (u) => {
+    // pstatic.net(네이버)은 type= 쿼리로 리사이즈/블러 변형을 서빙한다.
+    // lazy placeholder(w80_blur 등)를 판독 가능한 원본 폭으로 승격.
+    try {
+      if (/\\.pstatic\\.net\\//i.test(u)) {
+        u = u.replace(/([?&]type=)w\\d+(_blur)?/i, "$1w800");
+      }
+    } catch (e) {}
+    return u;
+  };
   const resolve = (el) => {
-    let u = http(el.currentSrc) || http(el.getAttribute("src"))
-         || http(el.getAttribute("data-lazy-src")) || http(el.getAttribute("data-src"))
+    // lazy-load 사이트는 실제 원본을 data-* 속성에 두고 src엔 저해상도/블러
+    // placeholder를 둔다 → data-* 를 src보다 *먼저* 본다.
+    let u = http(el.getAttribute("data-lazy-src")) || http(el.getAttribute("data-src"))
          || http(el.getAttribute("data-original")) || http(el.getAttribute("data-echo"));
-    if (u) return u;
-    const ss = el.getAttribute("srcset") || el.getAttribute("data-srcset") || "";
-    return http(ss.trim().split(/[\\s,]+/)[0]);          // srcset 첫 후보
+    if (!u) {
+      const ss = el.getAttribute("srcset") || el.getAttribute("data-srcset") || "";
+      u = http(ss.trim().split(/[\\s,]+/)[0]);           // srcset 첫 후보
+    }
+    if (!u) u = http(el.currentSrc) || http(el.getAttribute("src"));  // 최후: 실제 src
+    return u ? normalize(u) : "";
   };
   const seen = new Set();
   const collected = [];
