@@ -41,7 +41,8 @@ SHOT_VIEWPORT = {"width": 1280, "height": 800}
 SHOT_QUALITY = 80
 SHOT_RETRY_QUALITY = 50      # 5MB 초과 시 1회 재시도 품질
 SHOT_MAX_BYTES = 5_000_000   # raw JPEG 상한 (base64 전)
-FULLPAGE_MAX_PX = 4000       # full_page 캡처 높이 캡 (메모리/토큰 폭주 방지)
+FULLPAGE_MAX_PX = 2500       # full_page 캡처 높이 캡. Claude 고해상 비전 장변 한도(2576px)
+                             # 이내로 둬 다운스케일·초대형 이미지 거부를 피한다.
 SHOT_TIMEOUT_MS = 10_000     # screenshot 자체 타임아웃 (기본 30s는 예산 초과)
 IMG_MARKER_MAX = 40          # 본문에 심는 이미지 마커 최대 개수
 
@@ -201,42 +202,44 @@ async def _shoot(page, quality: int, *, clip=None, full_page=False) -> bytes:
 
 
 async def _capture_screenshot(page, full_page: bool, notes: list[str]) -> bytes | None:
-    """뷰포트/전체 스크린샷. 실패 시 뷰포트 폴백, 초과 시 품질 재시도, 최후엔 None."""
-    clip = None
-    use_full = False
+    """뷰포트 스크린샷. full_page면 뷰포트 높이를 문서 높이(캡 이내)로 키워 상단부를 캡처.
+
+    Playwright는 `full_page=True` 없이 clip만으로는 뷰포트 밖을 캡처하지 못하므로,
+    '상단 N px'는 뷰포트 리사이즈로 구현한다. 실패/용량초과 시 폴백·드롭.
+    """
     if full_page:
-        # lazy-load 프리스크롤은 render()의 _autoscroll이 이미 수행함
         try:
             doc_h = int(await page.evaluate("() => document.documentElement.scrollHeight") or 0)
         except Exception:
             doc_h = 0
+        target = min(doc_h, FULLPAGE_MAX_PX) if doc_h > 0 else FULLPAGE_MAX_PX
         if doc_h > FULLPAGE_MAX_PX:
-            # clip과 full_page는 배타 — 긴 문서는 상단만 절단 캡처
-            clip = {"x": 0, "y": 0, "width": SHOT_VIEWPORT["width"], "height": FULLPAGE_MAX_PX}
             notes.append(f"문서 높이 {doc_h}px — 상단 {FULLPAGE_MAX_PX}px만 캡처")
-        else:
-            use_full = True
-
-    try:
-        shot = await _shoot(page, SHOT_QUALITY, clip=clip, full_page=use_full)
-    except Exception as e:
         try:
-            shot = await _shoot(page, SHOT_QUALITY)
-            notes.append(f"전체 캡처 실패({type(e).__name__}) — 뷰포트만 캡처")
-            clip, use_full = None, False
-        except Exception as e2:
-            notes.append(f"스크린샷 실패: {type(e2).__name__}")
-            return None
-
-    if len(shot) > SHOT_MAX_BYTES:
-        try:
-            shot = await _shoot(page, SHOT_RETRY_QUALITY, clip=clip, full_page=use_full)
-            notes.append(f"용량 초과로 품질 {SHOT_RETRY_QUALITY}로 재캡처")
+            await page.set_viewport_size(
+                {"width": SHOT_VIEWPORT["width"], "height": max(target, SHOT_VIEWPORT["height"])}
+            )
+            await page.wait_for_timeout(300)   # 리사이즈 후 레이아웃/lazy 재배치 대기
         except Exception:
             pass
-    if len(shot) > SHOT_MAX_BYTES:
-        notes.append(f"스크린샷 {len(shot)}B > {SHOT_MAX_BYTES}B — 첨부 생략")
+
+    try:
+        shot = await _shoot(page, SHOT_QUALITY)
+    except Exception as e:
+        notes.append(f"스크린샷 실패: {type(e).__name__}")
         return None
+
+    if len(shot) > SHOT_MAX_BYTES:
+        try:
+            shot2 = await _shoot(page, SHOT_RETRY_QUALITY)
+        except Exception:
+            shot2 = shot
+        if len(shot2) <= SHOT_MAX_BYTES:
+            shot = shot2
+            notes.append(f"용량 초과로 품질 {SHOT_RETRY_QUALITY}로 재캡처")
+        else:
+            notes.append(f"스크린샷 {len(shot2)}B > {SHOT_MAX_BYTES}B — 첨부 생략")
+            return None
     return shot
 
 
@@ -305,12 +308,15 @@ async def render(url: str, screenshot: bool = False, full_page: bool = False) ->
                 text = ""
                 notes.append("본문(body) 요소 없음")
 
+            sdims = _image_dims("image/jpeg", shot) if shot else None
             return {
                 "v": 1,
                 "text": text[:MAX_CHARS],
                 "images": images,
                 "screenshot_b64": base64.b64encode(shot).decode() if shot else None,
                 "screenshot_mime": "image/jpeg",
+                "screenshot_dims": list(sdims) if sdims else None,
+                "screenshot_bytes": len(shot) if shot else None,
                 "notes": notes,
             }
         finally:

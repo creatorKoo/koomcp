@@ -129,7 +129,16 @@ def _assemble_text(envelope: dict, screenshot_attached: bool) -> str:
     if notes:
         parts.append("\n\n[참고] " + " / ".join(notes))
     if screenshot_attached:
-        parts.append("\n\n[스크린샷 첨부됨]")
+        # fetch_image처럼 메타 라인을 붙여, 이미지 블록이 첨부됐다는 텍스트 증거를 남긴다
+        # (일부 클라이언트는 트랜스크립트에 픽셀을 안 보여줌).
+        dims = envelope.get("screenshot_dims")
+        nbytes = envelope.get("screenshot_bytes")
+        meta = "JPEG"
+        if dims:
+            meta = f"{dims[0]}×{dims[1]}px, JPEG"
+        if nbytes:
+            meta += f", {nbytes:,}B"
+        parts.append(f"\n\n[스크린샷 첨부: {meta}]")
     return "".join(parts)
 
 
