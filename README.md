@@ -4,6 +4,18 @@ JS로 렌더링되는 웹페이지를 가져오는 remote MCP 서버. Claude.ai 
 보안 핵심은 **controller–runner 격리**: 인터넷에 노출된 컨트롤러는 인증·디스패치만 하고,
 실제 브라우저 렌더링은 요청마다 떴다 사라지는 ephemeral runner(gVisor)에서만 수행.
 
+## 도구
+
+| 도구 | 기능 |
+|---|---|
+| `fetch_webpage(url, include_screenshot=False, full_page=False)` | JS 렌더링 후 본문 텍스트. 이미지 위치에 `[이미지: alt — URL]` 마커 항상 포함(최대 40개). `include_screenshot=True`면 스크린샷(JPEG, 뷰포트 1280×800)을 MCP 이미지 블록으로 동봉, `full_page=True`면 스크롤 전체(최대 4000px, 스크린샷 자동 포함) |
+| `fetch_image(image_url)` | 특정 이미지를 원본 해상도로 반환 (JPEG/PNG/GIF/WebP ≤5MB, 장변 ≤8000px; SVG는 래스터라이즈). 마커에서 고른 이미지를 자세히 볼 때 |
+
+한도: 스크린샷/이미지 raw 5MB(초과 시 품질 50 재시도 후 생략), 텍스트 1MB, 스크린샷 경로
+타임아웃 45s(텍스트 30s). runner stdout은 JSON envelope(`{"v":1, ...}`).
+
+알려진 한계: PDF·다운로드 트리거 URL은 실패(브라우저 렌더링 대상 아님).
+
 > 참고: 상세 빌드 스펙 문서는 개인 메모라 저장소에 포함하지 않았다.
 
 ## 구성
@@ -51,10 +63,16 @@ bash ~/koomcp/deploy/setup-egress.sh
 # 4) socket-proxy 기동
 docker compose -f ~/koomcp/deploy/docker-compose.yml up -d
 
-# 5) runner 단독 테스트 (gVisor + egress)
+# 5) runner 단독 테스트 (gVisor + egress) — JSON envelope가 나와야 함
 docker run --rm --runtime=runsc --network=surf-egress \
   --read-only --tmpfs /tmp --cap-drop=ALL --security-opt=no-new-privileges \
   web-surf-runner:latest https://example.com
+# 스크린샷 모드 (screenshot_b64가 JPEG인지 확인)
+docker run --rm --runtime=runsc --network=surf-egress \
+  --read-only --tmpfs /tmp --cap-drop=ALL --security-opt=no-new-privileges \
+  web-surf-runner:latest https://example.com --screenshot \
+  | python3 -c "import json,sys,base64; d=json.load(sys.stdin); \
+print('keys:', sorted(d), 'jpeg:', base64.b64decode(d['screenshot_b64'])[:2]==b'\xff\xd8')"
 
 # 6) 컨트롤러 venv + 의존성
 python3 -m venv ~/koomcp/controller/.venv
@@ -76,6 +94,17 @@ sudo systemctl restart caddy
 
 # 10) 동작 확인 (디스커버리 체인)
 curl -s https://<내도메인>/.well-known/oauth-authorization-server | head
+```
+
+## 재배포 (코드 변경 시)
+
+**순서 중요**: runner(render.py) 변경이 포함되면 **이미지 rebuild가 먼저**, controller 재시작이 나중.
+(구버전 runner + 신버전 controller 조합은 JSON 파싱 에러 — 에러 메시지에 힌트 있음)
+
+```bash
+git pull   # 또는 scp
+docker build -t web-surf-runner:latest ~/koomcp/runner   # ① runner 먼저
+sudo systemctl restart koo-mcp-controller                # ② controller 나중
 ```
 
 ## Claude.ai 커넥터 등록 (사람이 수동, 맨 마지막)

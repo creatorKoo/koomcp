@@ -22,9 +22,19 @@
   재검증(리다이렉트·sub-resource 포함) → ③egress iptables DROP(메타데이터 169.254.169.254 / RFC1918 / CGNAT).
   **최종 backstop은 egress 방화벽**이다. app 레이어 검증만 믿지 말 것. (방화벽은 IPv4 전용 — runner 네트워크는
   IPv6 비활성 유지. IPv6 켜려면 ip6tables 미러 규칙 필수.)
+- runner의 **리소스 타입 차단(image/media/font)은 메모리 최적화지 보안 경계가 아니다** — 스크린샷/이미지
+  모드에서는 이미지·폰트를 허용한다. 보안 경계는 위 ②호스트 재검증과 ③egress 방화벽이며, 이 둘은
+  모드와 무관하게 모든 요청에 적용된다.
 - 컨트롤러는 **127.0.0.1만 바인딩**, 외부 노출은 Caddy(443)만.
-- **임의 JS 실행 도구를 노출하지 않는다.** 공개 도구는 `fetch_webpage` 하나.
+- **도구는 필요에 따라 계속 추가된다** (fetch_webpage가 유일하다고 가정하지 말 것; 현재 fetch_webpage,
+  fetch_image). 불변식은: **임의 JS/셸 실행을 노출하는 도구 금지 — 각 도구는 고정된 기능만 노출한다.**
+  runner 내부의 고정 evaluate 스니펫은 허용하되, **사용자 입력이 페이지 JS로 흘러들어서는 안 된다.**
+- untrusted 콘텐츠 **디코딩/렌더링은 runner(gVisor) 안에서만**. 컨트롤러는 URL 문자열과 runner의
+  JSON envelope만 다루고, 이미지 bytes는 디코딩 없이 통과만 시킨다.
 - 동시 runner 수는 `MAX_CONCURRENCY`(기본 3) 세마포어로 상한 — 자원 고갈/DoS 방어.
+- 크기/시간 상한: 스크린샷·이미지 raw 5MB, full_page 높이 4000px, 이미지 장변 8000px(초과 시 에러 —
+  Claude API 메시지 거부 방지), 본문 마커 40개 — 상수는 `runner/render.py` 상단.
+  `RENDER_TIMEOUT_SCREENSHOT`(기본 45s)·`STDOUT_MAX_BYTES`(기본 20MB)는 컨트롤러 env.
 
 ## MCP 도구 description 작성 방침
 
@@ -32,6 +42,11 @@
 즉 "JS 렌더링/SPA/무한스크롤 등 이 도구가 적합한 상황"을 앞세워 모델이 선제적으로 고르게 하고,
 "기본 web fetch로 본문이 안 나올 때" 같은 fallback 신호는 보조로 한 줄. (MCP 서버는 클라이언트의 다른
 도구 존재/우선순위를 모르므로, "실패하면 써라"식 강제보다 강점 명시가 여러 클라이언트에서 안정적.)
+
+추가 방침: **파라미터/자매 도구의 사용 시점도 description에 명시**한다 — 언제 켜는지(예:
+include_screenshot은 "시각 정보가 필요할 때만, 토큰 비용 있음"), 어느 도구가 어떤 케이스에 적합한지
+(fetch_image=특정 이미지 원본 vs include_screenshot=페이지 전체 레이아웃) 상호 참조를 넣어
+모델이 도구를 겹치지 않게 고르도록 한다.
 
 ## 업데이트 전략
 
