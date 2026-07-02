@@ -34,9 +34,7 @@ RESOLV_CONF = os.environ.get("RUNNER_RESOLV_CONF", "/etc/web-surf-resolv.conf")
 # lazy-load/무한스크롤 자동 처리로 무거운 페이지(예: 네이버 블로그)는 ~25s까지 걸려
 # 넉넉한 상한을 둔다. 정상 페이지는 5~10s라 영향 없음(타임아웃은 상한일 뿐).
 RENDER_TIMEOUT = int(os.environ.get("RENDER_TIMEOUT", "40"))
-# 스크린샷 경로는 이미지·폰트 로딩 + 캡처가 더 걸림 → 추가 여유
-RENDER_TIMEOUT_SCREENSHOT = int(os.environ.get("RENDER_TIMEOUT_SCREENSHOT", "50"))
-# runner stdout 상한 — 1차 캡은 runner 안(5MB raw 스크린샷 등)이고 이건 방어선
+# runner stdout 상한 — 1차 캡은 runner 안(이미지 5MB 등)이고 이건 방어선
 STDOUT_MAX_BYTES = int(os.environ.get("STDOUT_MAX_BYTES", str(20 * 1024 * 1024)))
 # 동시에 띄울 수 있는 runner 컨테이너 수 상한. authed 유저가 fetch를 난사해도
 # 박스 자원(메모리/CPU)이 고갈되지 않게 막는다. 초과 요청은 슬롯이 날 때까지 대기.
@@ -123,65 +121,31 @@ async def _run_runner(url: str, extra_args: list[str], timeout: int) -> dict:
     return envelope
 
 
-def _assemble_text(envelope: dict, screenshot_attached: bool) -> str:
+def _assemble_text(envelope: dict) -> str:
     parts = [envelope.get("text") or "(본문 없음)"]
     notes = envelope.get("notes") or []
     if notes:
         parts.append("\n\n[참고] " + " / ".join(notes))
-    if screenshot_attached:
-        # fetch_image처럼 메타 라인을 붙여, 이미지 블록이 첨부됐다는 텍스트 증거를 남긴다
-        # (일부 클라이언트는 트랜스크립트에 픽셀을 안 보여줌).
-        dims = envelope.get("screenshot_dims")
-        nbytes = envelope.get("screenshot_bytes")
-        meta = "JPEG"
-        if dims:
-            meta = f"{dims[0]}×{dims[1]}px, JPEG"
-        if nbytes:
-            meta += f", {nbytes:,}B"
-        parts.append(f"\n\n[스크린샷 첨부: {meta}]")
     return "".join(parts)
 
 
 @mcp.tool
-async def fetch_webpage(
-    url: str,
-    include_screenshot: bool = False,
-    full_page: bool = False,
-) -> str | list[str | Image]:
+async def fetch_webpage(url: str) -> str:
     """JavaScript로 렌더링되는 동적 웹페이지의 본문 텍스트를 반환한다.
 
     실제 브라우저(Chromium)로 JavaScript를 실행한 뒤의 최종 본문을 추출하므로,
     SPA·클라이언트 렌더링 페이지, 무한 스크롤로 늦게 채워지는 콘텐츠처럼
     정적 HTML만으로는 내용이 보이지 않는 페이지에 사용한다.
     본문 중 이미지가 있던 위치에는 `[이미지: alt — URL]` 마커가 포함되어
-    페이지에 어떤 이미지가 어디 있는지 항상 알 수 있다.
-
-    include_screenshot=True 를 주면 렌더된 페이지의 스크린샷(뷰포트 1280×800)이
-    이미지로 함께 반환된다 — 차트·레이아웃·디자인처럼 텍스트로 알 수 없는
-    시각 정보가 필요할 때만 사용 (토큰 비용 있음). full_page=True 는 스크롤
-    전체(최대 4000px)를 캡처하며 자동으로 스크린샷을 포함한다.
-    마커의 특정 이미지 한 장을 원본 화질로 봐야 하면 fetch_image 도구가 적합.
+    페이지에 어떤 이미지가 어디 있는지 항상 알 수 있다. 특정 이미지를 실제로
+    봐야 하면 그 URL을 fetch_image 도구에 넘긴다.
 
     정적 HTML만 읽는 기본 web fetch로 원하는 내용이 안 나올 때
     (본문이 비어 있음, "JavaScript를 켜라"는 안내 문구만 나옴 등)
     이 도구를 쓰면 된다.
     """
-    if full_page:
-        include_screenshot = True
-    flags = []
-    if include_screenshot:
-        flags.append("--screenshot")
-    if full_page:
-        flags.append("--full-page")
-    timeout = RENDER_TIMEOUT_SCREENSHOT if include_screenshot else RENDER_TIMEOUT
-
-    envelope = await _run_runner(url, flags, timeout)
-
-    shot_b64 = envelope.get("screenshot_b64")
-    text = _assemble_text(envelope, screenshot_attached=bool(shot_b64))
-    if shot_b64:
-        return [text, Image(data=base64.b64decode(shot_b64), format="jpeg")]
-    return text
+    envelope = await _run_runner(url, [], RENDER_TIMEOUT)
+    return _assemble_text(envelope)
 
 
 @mcp.tool
@@ -190,10 +154,7 @@ async def fetch_image(image_url: str) -> list[str | Image]:
 
     fetch_webpage 본문의 `[이미지: alt — URL]` 마커에서 고른 특정 이미지를
     자세히 봐야 할 때 사용한다 — 차트 값 판독, 사진/다이어그램 내용 확인 등.
-    페이지 전체 스크린샷은 다운스케일되어 개별 이미지가 뭉개지지만, 이 도구는
     해당 이미지 원본(JPEG/PNG/GIF/WebP, ≤5MB)을 그대로 전달한다.
-    페이지 전체의 레이아웃·분위기를 봐야 한다면 fetch_webpage 의
-    include_screenshot=True 가 더 적합하다.
     """
     envelope = await _run_runner(image_url, ["--fetch-image"], RENDER_TIMEOUT)
 

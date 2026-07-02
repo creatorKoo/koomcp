@@ -7,11 +7,10 @@
 호스트 재검증과 egress 방화벽이다.
 
 모드:
-  render.py <url>                            본문 텍스트 (+이미지 위치 마커)
-  render.py <url> --screenshot               + 뷰포트 스크린샷(JPEG)
-  render.py <url> --screenshot --full-page   + 전체 페이지(높이 캡)
-  render.py <url> --fetch-image              url을 이미지로 보고 원본 bytes 반환
+  render.py <url>                본문 텍스트 (+이미지 위치 마커 [이미지: alt — URL])
+  render.py <url> --fetch-image  url을 이미지로 보고 원본 bytes 반환
 
+페이지 시각 확인은 마커의 URL을 --fetch-image로 넘기는 방식(별도 도구 fetch_image).
 stdout: JSON envelope {"v":1, ...}. 에러는 stderr + 종료코드(2 usage, 3 SSRF, 1 실패).
 """
 import argparse
@@ -37,12 +36,10 @@ NAV_TIMEOUT_MS = 20_000      # goto(domcontentloaded) 상한
 #  무관하고 순전히 지연/SPA-텍스트 트레이드오프다.)
 IDLE_SETTLE_MS = 1_500
 
+# 뷰포트/캡처 관련 상수는 fetch_image(SVG 래스터라이즈 폴백)에서 사용.
 SHOT_VIEWPORT = {"width": 1280, "height": 800}
 SHOT_QUALITY = 80
-SHOT_RETRY_QUALITY = 50      # 5MB 초과 시 1회 재시도 품질
-SHOT_MAX_BYTES = 5_000_000   # raw JPEG 상한 (base64 전)
-FULLPAGE_MAX_PX = 2500       # full_page 캡처 높이 캡. Claude 고해상 비전 장변 한도(2576px)
-                             # 이내로 둬 다운스케일·초대형 이미지 거부를 피한다.
+SHOT_MAX_BYTES = 5_000_000   # raw 이미지 상한 (base64 전)
 SHOT_TIMEOUT_MS = 10_000     # screenshot 자체 타임아웃 (기본 30s는 예산 초과)
 IMG_MARKER_MAX = 40          # 본문에 심는 이미지 마커 최대 개수
 
@@ -192,62 +189,15 @@ async def _autoscroll(page) -> None:
         pass
 
 
-async def _shoot(page, quality: int, *, clip=None, full_page=False) -> bytes:
-    kwargs = dict(type="jpeg", quality=quality, timeout=SHOT_TIMEOUT_MS)
-    if clip:
-        kwargs["clip"] = clip
-    if full_page:
-        kwargs["full_page"] = True
-    return await page.screenshot(**kwargs)
+async def _shoot(page, quality: int) -> bytes:
+    return await page.screenshot(type="jpeg", quality=quality, timeout=SHOT_TIMEOUT_MS)
 
 
-async def _capture_screenshot(page, full_page: bool, notes: list[str]) -> bytes | None:
-    """뷰포트 스크린샷. full_page면 뷰포트 높이를 문서 높이(캡 이내)로 키워 상단부를 캡처.
-
-    Playwright는 `full_page=True` 없이 clip만으로는 뷰포트 밖을 캡처하지 못하므로,
-    '상단 N px'는 뷰포트 리사이즈로 구현한다. 실패/용량초과 시 폴백·드롭.
-    """
-    if full_page:
-        try:
-            doc_h = int(await page.evaluate("() => document.documentElement.scrollHeight") or 0)
-        except Exception:
-            doc_h = 0
-        target = min(doc_h, FULLPAGE_MAX_PX) if doc_h > 0 else FULLPAGE_MAX_PX
-        if doc_h > FULLPAGE_MAX_PX:
-            notes.append(f"문서 높이 {doc_h}px — 상단 {FULLPAGE_MAX_PX}px만 캡처")
-        try:
-            await page.set_viewport_size(
-                {"width": SHOT_VIEWPORT["width"], "height": max(target, SHOT_VIEWPORT["height"])}
-            )
-            await page.wait_for_timeout(300)   # 리사이즈 후 레이아웃/lazy 재배치 대기
-        except Exception:
-            pass
-
-    try:
-        shot = await _shoot(page, SHOT_QUALITY)
-    except Exception as e:
-        notes.append(f"스크린샷 실패: {type(e).__name__}")
-        return None
-
-    if len(shot) > SHOT_MAX_BYTES:
-        try:
-            shot2 = await _shoot(page, SHOT_RETRY_QUALITY)
-        except Exception:
-            shot2 = shot
-        if len(shot2) <= SHOT_MAX_BYTES:
-            shot = shot2
-            notes.append(f"용량 초과로 품질 {SHOT_RETRY_QUALITY}로 재캡처")
-        else:
-            notes.append(f"스크린샷 {len(shot2)}B > {SHOT_MAX_BYTES}B — 첨부 생략")
-            return None
-    return shot
-
-
-async def render(url: str, screenshot: bool = False, full_page: bool = False) -> dict:
+async def render(url: str) -> dict:
     notes: list[str] = []
-    # 스크린샷 모드: 페이지가 제대로 보여야 하므로 이미지·폰트 허용(media만 차단).
-    # 텍스트 모드: 기존대로 image/media/font 차단(메모리 절약).
-    blocked = ("media",) if screenshot else ("image", "media", "font")
+    # 텍스트 추출만 하므로 image/media/font는 항상 차단(메모리·속도 최적화).
+    # 이미지 URL은 DOM 마커에서 뽑고, 실제 픽셀은 별도 fetch_image가 담당한다.
+    blocked = ("image", "media", "font")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -288,19 +238,11 @@ async def render(url: str, screenshot: bool = False, full_page: bool = False) ->
                     pass
                 await _autoscroll(page)
 
-            if screenshot:
-                # 이미지 허용 모드: lazy-loader가 정상 로드 → 정착·스크롤 후 캡처,
-                # 마커는 캡처 *후* 삽입(마커가 화면에 찍히면 안 됨).
-                await _settle()
-                shot = await _capture_screenshot(page, full_page, notes)
-                images = await _collect_markers()
-            else:
-                # 텍스트 모드: 이미지가 abort되므로, 페이지 JS가 lazy <img>를 에러
-                # placeholder로 바꿔 URL을 날리기 *전에* 정적 마크업(data-lazy-src 등)에서
-                # 먼저 마커를 확보한다. 그 뒤 정착·스크롤로 무한스크롤 텍스트를 채운다.
-                shot = None
-                images = await _collect_markers()
-                await _settle()
+            # 이미지가 abort되는 상태에서 페이지 JS가 lazy <img>를 에러 placeholder로
+            # 바꿔 URL을 날리기 *전에*, 정적 마크업(data-lazy-src 등)에서 먼저 마커를
+            # 확보한다. 그 뒤 정착·스크롤로 무한스크롤/lazy 텍스트를 채운다.
+            images = await _collect_markers()
+            await _settle()
 
             try:
                 text = await page.inner_text("body")
@@ -308,15 +250,10 @@ async def render(url: str, screenshot: bool = False, full_page: bool = False) ->
                 text = ""
                 notes.append("본문(body) 요소 없음")
 
-            sdims = _image_dims("image/jpeg", shot) if shot else None
             return {
                 "v": 1,
                 "text": text[:MAX_CHARS],
                 "images": images,
-                "screenshot_b64": base64.b64encode(shot).decode() if shot else None,
-                "screenshot_mime": "image/jpeg",
-                "screenshot_dims": list(sdims) if sdims else None,
-                "screenshot_bytes": len(shot) if shot else None,
                 "notes": notes,
             }
         finally:
@@ -426,17 +363,11 @@ async def fetch_image(url: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(prog="render.py", add_help=False)
     parser.add_argument("url")
-    parser.add_argument("--screenshot", action="store_true")
-    parser.add_argument("--full-page", action="store_true", dest="full_page")
     parser.add_argument("--fetch-image", action="store_true", dest="fetch_image")
     try:
         args = parser.parse_args()
     except SystemExit:
-        print("usage: render.py <url> [--screenshot] [--full-page] | <url> --fetch-image",
-              file=sys.stderr)
-        return 2
-    if args.fetch_image and (args.screenshot or args.full_page):
-        print("--fetch-image는 --screenshot/--full-page와 함께 쓸 수 없음", file=sys.stderr)
+        print("usage: render.py <url> | render.py <url> --fetch-image", file=sys.stderr)
         return 2
 
     try:
@@ -449,12 +380,7 @@ def main() -> int:
         if args.fetch_image:
             envelope = asyncio.run(fetch_image(args.url))
         else:
-            # full_page는 screenshot을 함의
-            envelope = asyncio.run(render(
-                args.url,
-                screenshot=args.screenshot or args.full_page,
-                full_page=args.full_page,
-            ))
+            envelope = asyncio.run(render(args.url))
     except Exception as e:
         print(f"렌더링 실패: {e}", file=sys.stderr)
         return 1

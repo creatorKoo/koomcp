@@ -22,8 +22,8 @@
   재검증(리다이렉트·sub-resource 포함) → ③egress iptables DROP(메타데이터 169.254.169.254 / RFC1918 / CGNAT).
   **최종 backstop은 egress 방화벽**이다. app 레이어 검증만 믿지 말 것. (방화벽은 IPv4 전용 — runner 네트워크는
   IPv6 비활성 유지. IPv6 켜려면 ip6tables 미러 규칙 필수.)
-- runner의 **리소스 타입 차단(image/media/font)은 메모리 최적화지 보안 경계가 아니다** — 스크린샷/이미지
-  모드에서는 이미지·폰트를 허용한다. 보안 경계는 위 ②호스트 재검증과 ③egress 방화벽이며, 이 둘은
+- runner의 **리소스 타입 차단(image/media/font)은 메모리 최적화지 보안 경계가 아니다** — 필요 시(예:
+  fetch_image) 이미지를 허용한다. 보안 경계는 위 ②호스트 재검증과 ③egress 방화벽이며, 이 둘은
   모드와 무관하게 모든 요청에 적용된다.
 - 컨트롤러는 **127.0.0.1만 바인딩**, 외부 노출은 Caddy(443)만.
 - **도구는 필요에 따라 계속 추가된다** (fetch_webpage가 유일하다고 가정하지 말 것; 현재 fetch_webpage,
@@ -32,11 +32,13 @@
 - untrusted 콘텐츠 **디코딩/렌더링은 runner(gVisor) 안에서만**. 컨트롤러는 URL 문자열과 runner의
   JSON envelope만 다루고, 이미지 bytes는 디코딩 없이 통과만 시킨다.
 - 동시 runner 수는 `MAX_CONCURRENCY`(기본 3) 세마포어로 상한 — 자원 고갈/DoS 방어.
-- 크기/시간 상한: 스크린샷·이미지 raw 5MB, full_page 높이 4000px, 이미지 장변 8000px(초과 시 에러 —
-  Claude API 메시지 거부 방지), 본문 마커 40개 — 상수는 `runner/render.py` 상단.
-  타임아웃은 컨트롤러 env: `RENDER_TIMEOUT`(텍스트, 기본 40s)·`RENDER_TIMEOUT_SCREENSHOT`(기본 50s)·
-  `STDOUT_MAX_BYTES`(기본 20MB). lazy-load/무한스크롤은 runner가 자동 스크롤로 처리하되, 텍스트
-  모드는 이미지가 abort돼 페이지 JS가 lazy URL을 망치기 전에 **정적 마크업에서 마커를 먼저 확보**한다.
+- 이미지 접근 방식: `fetch_webpage`는 본문에 `[이미지: alt — URL]` 마커만 넣고(텍스트), 실제 픽셀은
+  별도 `fetch_image(url)`가 반환한다. (페이지 전체 스크린샷은 다운스케일 판독난·원격 커넥터
+  이미지블록 호환성 이슈로 노출하지 않음 — 마커→fetch_image로 대체.)
+- 크기/시간 상한: 이미지 raw 5MB, 이미지 장변 8000px(초과 시 에러 — Claude API 메시지 거부 방지),
+  본문 마커 40개 — 상수는 `runner/render.py` 상단. 타임아웃은 컨트롤러 env: `RENDER_TIMEOUT`(기본 40s)·
+  `STDOUT_MAX_BYTES`(기본 20MB). lazy-load/무한스크롤은 runner가 자동 스크롤로 처리하되, 이미지가
+  abort돼 페이지 JS가 lazy URL을 망치기 전에 **정적 마크업(data-lazy-src 등)에서 마커를 먼저 확보**한다.
 
 ## MCP 도구 description 작성 방침
 
